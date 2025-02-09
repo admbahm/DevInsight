@@ -1,0 +1,23 @@
+# DevInsight .gitignore
+
+# Target directory
+/target/
+
+# Rust/Cargo specific files
+**/*.rs.bk
+Cargo.lock
+
+# IDE/editor files
+.idea/
+.vscode/
+
+# Logs & debug artifacts
+*.log
+*.dSYM/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Binary executables
+/devinsight
