@@ -21,3 +21,8 @@ Thumbs.db
 
 # Binary executables
 /devinsight
+
+
+# Added by cargo
+
+/target
