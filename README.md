@@ -157,7 +157,7 @@ MIT License © 2024 Adam Deane
 DevInsight now supports persistent log storage with automatic rotation:
 
 ```bash
-# Save logs to file (default location: ./logs)
+# Save logs to file (default location: ./logs/logcat_YYYYMMDD_HHMMSS.jsonl)
 cargo run -- --save
 
 # Save logs in interactive mode
@@ -165,17 +165,23 @@ cargo run -- -i --save
 
 # Specify custom save location
 cargo run -- --save --save-path /path/to/logs
+cargo run -- --save --save-path ~/android_logs    # Store in home directory
+cargo run -- --save --save-path /tmp/my_logs      # Store in temporary directory
 
 # Set maximum log file size before rotation (in MB)
 cargo run -- --save --max-size 200
-
-# Load and analyze previous logs
-cargo run -- --load /path/to/logs/logcat_20240321_123456.jsonl
 ```
 
 Logs are stored in JSONL format with the following features:
+- Files named with timestamp pattern: `logcat_YYYYMMDD_HHMMSS.jsonl`
 - Automatic log rotation based on file size
 - Timestamp-based querying
 - Device ID tracking
 - Full log level and tag preservation
+
+Example log file path:
+```
+./logs/logcat_20240321_143022.jsonl  # Default location
+~/android_logs/logcat_20240321_143022.jsonl  # When using --save-path ~/android_logs
+```
 
