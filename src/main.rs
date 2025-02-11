@@ -3,7 +3,8 @@ use std::io::{BufRead, BufReader};
 use thiserror::Error;
 use colored::*;
 use clap::Parser;
-use chrono::NaiveDateTime;
+mod tui;
+use tui::{Tui, LogEntry, LogLevel};
 
 #[derive(Error, Debug)]
 pub enum DevInsightError {
@@ -40,6 +41,9 @@ struct Cli {
     
     #[arg(short = 'v', long = "format", help = "Log format (brief, process, tag, thread, raw)", value_parser = ["brief", "process", "tag", "thread", "raw"], default_value = "brief")]
     format: String,
+    
+    #[arg(short = 'i', long = "interactive", help = "Use interactive TUI mode")]
+    interactive: bool,
 }
 
 struct LogProcessor {
@@ -96,13 +100,109 @@ impl LogProcessor {
 }
 
 fn main() -> Result<(), DevInsightError> {
+    let cli = Cli::parse();
+    
+    if cli.interactive {
+        run_interactive_mode()?;
+    } else {
+        run_standard_mode(cli)?;
+    }
+    
+    Ok(())
+}
+
+fn run_interactive_mode() -> Result<(), DevInsightError> {
+    // Create a channel for communication
+    let (tx, rx) = std::sync::mpsc::channel();
+    
+    // Create TUI with receiver
+    let mut tui = Tui::new(rx).map_err(|e| DevInsightError::IoError(e))?;
+    
+    // Set up ADB command
+    let process = Command::new("adb")
+        .args(["logcat", "-v", "threadtime"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|_| DevInsightError::AdbNotFound)?;
+
+    let stdout = process.stdout
+        .ok_or(DevInsightError::LogcatCaptureFailed("Failed to capture stdout".to_string()))?;
+    let reader = BufReader::new(stdout);
+
+    // Process logs in a separate thread
+    let tx_clone = tx.clone();
+    std::thread::spawn(move || {
+        for line in reader.lines() {
+            if let Ok(log) = line {
+                let entry = parse_log_entry(&log);
+                tx_clone.send(entry).ok();  // Ignore send errors
+            }
+        }
+    });
+
+    // Run the TUI
+    tui.run().map_err(|e| DevInsightError::IoError(e))?;
+    
+    Ok(())
+}
+
+fn parse_log_entry(log: &str) -> LogEntry {
+    // Example threadtime format: "03-21 10:23:45.678  1234  5678 D Tag: Message"
+    let parts: Vec<&str> = log.splitn(2, ':').collect();
+    let message = parts.get(1)
+        .map(|s| s.trim())
+        .unwrap_or(log)
+        .to_string();
+    
+    let header_parts: Vec<&str> = parts.get(0)
+        .unwrap_or(&"")
+        .split_whitespace()
+        .collect();
+    
+    let timestamp = if header_parts.len() >= 2 {
+        format!("{} {}", header_parts[0], header_parts[1])
+    } else {
+        chrono::Local::now().format("%m-%d %H:%M:%S").to_string()
+    };
+
+    let tag = header_parts
+        .iter()
+        .rev()
+        .take(2)
+        .last()
+        .unwrap_or(&"UNKNOWN")
+        .to_string();
+
+    let level = if log.contains(" E ") || log.contains("Error") {
+        LogLevel::Error
+    } else if log.contains(" W ") || log.contains("Warning") {
+        LogLevel::Warning
+    } else if log.contains(" I ") || log.contains("Info") {
+        LogLevel::Info
+    } else if log.contains(" D ") || log.contains("Debug") {
+        LogLevel::Debug
+    } else if log.contains(" V ") || log.contains("Verbose") {
+        LogLevel::Verbose
+    } else {
+        LogLevel::Unknown
+    };
+
+    LogEntry {
+        level,
+        timestamp,
+        tag,
+        message,
+    }
+}
+
+// Rename existing main logic
+fn run_standard_mode(cli: Cli) -> Result<(), DevInsightError> {
     // Force color output
     colored::control::set_override(true);
     
     println!("{}", "DevInsight: Android Log Analyzer".cyan().bold());
     println!("{}", "=".repeat(50).cyan());
 
-    let cli = Cli::parse();
     let processor = LogProcessor::new(cli.filter.clone(), cli.tag.clone());
 
     println!("{}", "Starting DevInsight: Real-time Android Log Analyzer...".cyan().bold());
