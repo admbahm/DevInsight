@@ -7,6 +7,8 @@ use std::path::PathBuf;
 mod tui;
 use tui::{Tui, LogEntry, LogLevel};
 use chrono::Local;
+mod storage;
+use storage::{LogStorage, StoredLog};
 
 #[derive(Error, Debug)]
 pub enum DevInsightError {
@@ -304,10 +306,30 @@ fn run_standard_mode(cli: Cli) -> Result<(), DevInsightError> {
         .output()
         .ok();
 
+    // Initialize storage if needed
+    let mut storage = if cli.save {
+        Some(LogStorage::new(cli.save_path.clone(), cli.max_size)
+            .map_err(|e| DevInsightError::StorageError(e.to_string()))?)
+    } else {
+        None
+    };
+
     for line in reader.lines() {
         match line {
             Ok(log) => {
                 if processor.should_process_log(&log) {
+                    // Store log if storage is enabled
+                    if let Some(storage) = &mut storage {
+                        let entry = parse_log_entry(&log);
+                        let stored_log = StoredLog {
+                            timestamp: Local::now(),
+                            level: entry.level.as_str().to_string(),
+                            tag: entry.tag.clone(),
+                            message: entry.message.clone(),
+                            device_id: None,
+                        };
+                        storage.store_log(stored_log).ok();
+                    }
                     println!("{}", processor.format_log(&log));
                 }
             }

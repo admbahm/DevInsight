@@ -153,3 +153,29 @@ MIT License © 2024 Adam Deane
 ## Connect
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Adam_Deane-blue?style=for-the-badge&logo=linkedin)](https://www.linkedin.com/in/adam-deane-93456927/)
 
+### Log Storage
+DevInsight now supports persistent log storage with automatic rotation:
+
+```bash
+# Save logs to file (default location: ./logs)
+cargo run -- --save
+
+# Save logs in interactive mode
+cargo run -- -i --save
+
+# Specify custom save location
+cargo run -- --save --save-path /path/to/logs
+
+# Set maximum log file size before rotation (in MB)
+cargo run -- --save --max-size 200
+
+# Load and analyze previous logs
+cargo run -- --load /path/to/logs/logcat_20240321_123456.jsonl
+```
+
+Logs are stored in JSONL format with the following features:
+- Automatic log rotation based on file size
+- Timestamp-based querying
+- Device ID tracking
+- Full log level and tag preservation
+
