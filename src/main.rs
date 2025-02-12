@@ -132,16 +132,20 @@ fn main() -> Result<(), DevInsightError> {
 }
 
 fn run_interactive_mode(cli: &Cli) -> Result<(), DevInsightError> {
-    // Create a channel for communication
-    let (tx, rx) = std::sync::mpsc::channel();
+    // Create channels for logs and storage updates
+    let (log_tx, log_rx) = std::sync::mpsc::channel();
+    let (storage_tx, storage_rx) = std::sync::mpsc::channel();
     
-    // Create TUI with receiver
-    let mut tui = Tui::new(rx).map_err(|e| DevInsightError::IoError(e))?;
+    // Create TUI with receivers
+    let mut tui = Tui::new(log_rx, storage_rx).map_err(|e| DevInsightError::IoError(e))?;
     
     // Initialize storage if needed
     let storage = if cli.save {
-        Some(LogStorage::new(cli.save_path.clone(), cli.max_size)
-            .map_err(|e| DevInsightError::StorageError(e.to_string()))?)
+        Some(LogStorage::new(
+            cli.save_path.clone(),
+            cli.max_size,
+            Some(storage_tx)
+        ).map_err(|e| DevInsightError::StorageError(e.to_string()))?)
     } else {
         None
     };
@@ -158,7 +162,7 @@ fn run_interactive_mode(cli: &Cli) -> Result<(), DevInsightError> {
     let reader = BufReader::new(stdout);
 
     // Process logs in a separate thread
-    let tx_clone = tx.clone();
+    let tx_clone = log_tx.clone();
     let mut storage = storage;  // Move storage into the thread
     std::thread::spawn(move || {
         for line in reader.lines() {
@@ -308,8 +312,11 @@ fn run_standard_mode(cli: Cli) -> Result<(), DevInsightError> {
 
     // Initialize storage if needed
     let mut storage = if cli.save {
-        Some(LogStorage::new(cli.save_path.clone(), cli.max_size)
-            .map_err(|e| DevInsightError::StorageError(e.to_string()))?)
+        Some(LogStorage::new(
+            cli.save_path.clone(),
+            cli.max_size,
+            None // No storage updates needed in standard mode
+        ).map_err(|e| DevInsightError::StorageError(e.to_string()))?)
     } else {
         None
     };
