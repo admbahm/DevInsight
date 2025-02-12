@@ -3,8 +3,12 @@ use std::io::{BufRead, BufReader};
 use thiserror::Error;
 use colored::*;
 use clap::Parser;
+use std::path::PathBuf;
 mod tui;
 use tui::{Tui, LogEntry, LogLevel};
+use chrono::Local;
+mod storage;
+use storage::{LogStorage, StoredLog};
 
 #[derive(Error, Debug)]
 pub enum DevInsightError {
@@ -16,6 +20,10 @@ pub enum DevInsightError {
     IoError(#[from] std::io::Error),
     #[error("Invalid timestamp format: {0}")]
     TimestampError(String),
+    #[error("Storage error: {0}")]
+    StorageError(String),
+    #[error("JSON serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
 }
 
 #[derive(Parser, Debug)]
@@ -44,6 +52,18 @@ struct Cli {
     
     #[arg(short = 'i', long = "interactive", help = "Use interactive TUI mode")]
     interactive: bool,
+    
+    #[arg(long = "save", help = "Save logs to file")]
+    save: bool,
+    
+    #[arg(long = "save-path", help = "Directory to save logs", default_value = "logs")]
+    save_path: PathBuf,
+    
+    #[arg(long = "max-size", help = "Maximum log file size in MB before rotation", default_value = "100")]
+    max_size: u64,
+    
+    #[arg(long = "load", help = "Load and analyze logs from file")]
+    load: Option<PathBuf>,
 }
 
 struct LogProcessor {
@@ -103,7 +123,7 @@ fn main() -> Result<(), DevInsightError> {
     let cli = Cli::parse();
     
     if cli.interactive {
-        run_interactive_mode()?;
+        run_interactive_mode(&cli)?;
     } else {
         run_standard_mode(cli)?;
     }
@@ -111,13 +131,25 @@ fn main() -> Result<(), DevInsightError> {
     Ok(())
 }
 
-fn run_interactive_mode() -> Result<(), DevInsightError> {
-    // Create a channel for communication
-    let (tx, rx) = std::sync::mpsc::channel();
+fn run_interactive_mode(cli: &Cli) -> Result<(), DevInsightError> {
+    // Create channels for logs and storage updates
+    let (log_tx, log_rx) = std::sync::mpsc::channel();
+    let (storage_tx, storage_rx) = std::sync::mpsc::channel();
     
-    // Create TUI with receiver
-    let mut tui = Tui::new(rx).map_err(|e| DevInsightError::IoError(e))?;
+    // Create TUI with receivers
+    let mut tui = Tui::new(log_rx, storage_rx).map_err(|e| DevInsightError::IoError(e))?;
     
+    // Initialize storage if needed
+    let storage = if cli.save {
+        Some(LogStorage::new(
+            cli.save_path.clone(),
+            cli.max_size,
+            Some(storage_tx)
+        ).map_err(|e| DevInsightError::StorageError(e.to_string()))?)
+    } else {
+        None
+    };
+
     // Set up ADB command
     let process = Command::new("adb")
         .args(["logcat", "-v", "threadtime"])
@@ -130,12 +162,26 @@ fn run_interactive_mode() -> Result<(), DevInsightError> {
     let reader = BufReader::new(stdout);
 
     // Process logs in a separate thread
-    let tx_clone = tx.clone();
+    let tx_clone = log_tx.clone();
+    let mut storage = storage;  // Move storage into the thread
     std::thread::spawn(move || {
         for line in reader.lines() {
             if let Ok(log) = line {
                 let entry = parse_log_entry(&log);
-                tx_clone.send(entry).ok();  // Ignore send errors
+                
+                // Store log if storage is enabled
+                if let Some(storage) = &mut storage {
+                    let stored_log = StoredLog {
+                        timestamp: Local::now(),
+                        level: entry.level.as_str().to_string(),
+                        tag: entry.tag.clone(),
+                        message: entry.message.clone(),
+                        device_id: None,
+                    };
+                    storage.store_log(stored_log).ok();
+                }
+                
+                tx_clone.send(entry).ok();
             }
         }
     });
@@ -264,10 +310,33 @@ fn run_standard_mode(cli: Cli) -> Result<(), DevInsightError> {
         .output()
         .ok();
 
+    // Initialize storage if needed
+    let mut storage = if cli.save {
+        Some(LogStorage::new(
+            cli.save_path.clone(),
+            cli.max_size,
+            None // No storage updates needed in standard mode
+        ).map_err(|e| DevInsightError::StorageError(e.to_string()))?)
+    } else {
+        None
+    };
+
     for line in reader.lines() {
         match line {
             Ok(log) => {
                 if processor.should_process_log(&log) {
+                    // Store log if storage is enabled
+                    if let Some(storage) = &mut storage {
+                        let entry = parse_log_entry(&log);
+                        let stored_log = StoredLog {
+                            timestamp: Local::now(),
+                            level: entry.level.as_str().to_string(),
+                            tag: entry.tag.clone(),
+                            message: entry.message.clone(),
+                            device_id: None,
+                        };
+                        storage.store_log(stored_log).ok();
+                    }
                     println!("{}", processor.format_log(&log));
                 }
             }
