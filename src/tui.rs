@@ -1,7 +1,7 @@
 use std::io;
 use ratatui::{
     backend::CrosstermBackend,
-    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Gauge},
     layout::{Layout, Direction, Constraint, Rect},
     style::{Color, Style, Modifier},
     Terminal, Frame,
@@ -74,6 +74,8 @@ pub struct AppState {
     pub search_mode: bool,
     pub storage_info: Option<StorageInfo>,
     pub stats: LogStats,
+    pub level_filters: Vec<LogLevel>,  // Enabled log levels
+    pub tail_mode: bool,  // Add this field
 }
 
 pub struct StorageInfo {
@@ -108,11 +110,27 @@ impl AppState {
                 debug_count: 0,
                 verbose_count: 0,
             },
+            level_filters: vec![  // Start with all levels enabled
+                LogLevel::Error,
+                LogLevel::Warning,
+                LogLevel::Info,
+                LogLevel::Debug,
+                LogLevel::Verbose,
+            ],
+            tail_mode: true,  // Start with tail mode enabled
         }
     }
 
     pub fn add_log(&mut self, entry: LogEntry) {
         if !self.paused {
+            // Batch process logs for better performance
+            if self.logs.len() >= 10000 {
+                // Remove oldest 1000 logs when we hit the limit
+                for _ in 0..1000 {
+                    self.logs.pop_front();
+                }
+            }
+            
             // Update statistics
             match entry.level {
                 LogLevel::Error => self.stats.error_count += 1,
@@ -120,35 +138,46 @@ impl AppState {
                 LogLevel::Info => self.stats.info_count += 1,
                 LogLevel::Debug => self.stats.debug_count += 1,
                 LogLevel::Verbose => self.stats.verbose_count += 1,
-                LogLevel::Unknown => (), // Do nothing for unknown levels
+                LogLevel::Unknown => (),
             }
 
-            // Add log and maintain size limit
-            if self.logs.len() >= 10000 {
-                self.logs.pop_front();
-            }
             self.logs.push_back(entry);
             self.update_filtered_logs();
         }
     }
 
-    fn update_filtered_logs(&mut self) {
-        if self.search_query.is_empty() {
-            self.filtered_logs = (0..self.logs.len()).collect();
+    pub fn toggle_level(&mut self, level: LogLevel) {
+        if let Some(pos) = self.level_filters.iter().position(|&l| l == level) {
+            self.level_filters.remove(pos);
         } else {
-            self.filtered_logs = self.logs
-                .iter()
-                .enumerate()
-                .filter(|(_, log)| {
+            self.level_filters.push(level);
+        }
+        self.update_filtered_logs();
+    }
+
+    fn update_filtered_logs(&mut self) {
+        self.filtered_logs = self.logs
+            .iter()
+            .enumerate()
+            .filter(|(_, log)| {
+                let level_match = self.level_filters.contains(&log.level);
+                let search_match = if self.search_query.is_empty() {
+                    true
+                } else {
                     let search_term = self.search_query.to_lowercase();
-                    let message_match = log.message.to_lowercase().contains(&search_term);
-                    let tag_match = log.tag.to_lowercase().contains(&search_term);
-                    let level_match = log.level.as_str().to_lowercase().contains(&search_term);
-                    
-                    message_match || tag_match || level_match
-                })
-                .map(|(i, _)| i)
-                .collect();
+                    log.message.to_lowercase().contains(&search_term) ||
+                    log.tag.to_lowercase().contains(&search_term) ||
+                    log.level.as_str().to_lowercase().contains(&search_term)
+                };
+                
+                level_match && search_match
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        // Update scroll position if in tail mode
+        if self.tail_mode {
+            self.scroll = self.filtered_logs.len().saturating_sub(1);
         }
     }
 }
@@ -180,13 +209,66 @@ impl Tui {
     }
 
     pub fn run(&mut self) -> io::Result<()> {
+        const SPINNERS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let mut spinner_idx = 0;
+        let mut collected = 0;
+        let mut no_logs_count = 0;
+        const INITIAL_BATCH_SIZE: usize = 50;
+        const MAX_WAIT_CYCLES: usize = 20;  // About 1 second max wait
+
+        while collected < INITIAL_BATCH_SIZE && no_logs_count < MAX_WAIT_CYCLES {
+            self.terminal.draw(|f| {
+                let area = f.size();
+                let loading_area = Rect::new(
+                    area.width.saturating_sub(40) / 2,
+                    area.height.saturating_sub(3) / 2,
+                    40.min(area.width),
+                    3.min(area.height)
+                );
+
+                let status = if collected == 0 {
+                    format!("{} Waiting for logs...", SPINNERS[spinner_idx])
+                } else {
+                    format!("{} Collecting logs {}/{}", SPINNERS[spinner_idx], collected, INITIAL_BATCH_SIZE)
+                };
+                
+                let loading = Paragraph::new(status)
+                    .block(Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(ratatui::widgets::BorderType::Rounded))
+                    .style(Style::default().fg(Color::Cyan))
+                    .alignment(ratatui::layout::Alignment::Center);
+                
+                f.render_widget(loading, loading_area);
+            })?;
+
+            spinner_idx = (spinner_idx + 1) % SPINNERS.len();
+            
+            if let Ok(log) = self.log_rx.try_recv() {
+                self.state.add_log(log);
+                collected += 1;
+                no_logs_count = 0;
+            } else {
+                no_logs_count += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+
+        // Force initial update and scroll position
+        self.state.update_filtered_logs();
+        self.state.scroll = self.state.filtered_logs.len().saturating_sub(1);
+
+        // Main event loop
         loop {
-            // Check for new logs
+            // Process any new logs
             while let Ok(log) = self.log_rx.try_recv() {
                 self.state.add_log(log);
+                if self.state.tail_mode {
+                    self.state.scroll = self.state.filtered_logs.len().saturating_sub(1);
+                }
             }
 
-            // Check for storage updates
+            // Process storage updates
             while let Ok(update) = self.storage_rx.try_recv() {
                 self.state.storage_info = Some(StorageInfo {
                     current_file: update.current_file,
@@ -229,10 +311,18 @@ impl Tui {
                             KeyCode::Char('3') => self.state.current_view = View::Storage,
                             KeyCode::Char('/') => self.state.search_mode = true,
                             KeyCode::Char(' ') => self.state.paused = !self.state.paused,
-                            KeyCode::Up => self.state.scroll = self.state.scroll.saturating_sub(1),
+                            KeyCode::Char('t') => self.state.tail_mode = !self.state.tail_mode,
+                            KeyCode::Up => {
+                                self.state.tail_mode = false;  // Disable tail mode when manually scrolling
+                                self.state.scroll = self.state.scroll.saturating_sub(1);
+                            }
                             KeyCode::Down => {
                                 if self.state.scroll < self.state.filtered_logs.len().saturating_sub(1) {
                                     self.state.scroll += 1;
+                                    // Re-enable tail mode when scrolling to bottom
+                                    if self.state.scroll >= self.state.filtered_logs.len().saturating_sub(1) {
+                                        self.state.tail_mode = true;
+                                    }
                                 }
                             }
                             KeyCode::End | KeyCode::Char('G') => {
@@ -242,6 +332,11 @@ impl Tui {
                             KeyCode::Home | KeyCode::Char('g') => {
                                 self.state.scroll = 0;
                             }
+                            KeyCode::Char('e') => self.state.toggle_level(LogLevel::Error),
+                            KeyCode::Char('w') => self.state.toggle_level(LogLevel::Warning),
+                            KeyCode::Char('i') => self.state.toggle_level(LogLevel::Info),
+                            KeyCode::Char('d') => self.state.toggle_level(LogLevel::Debug),
+                            KeyCode::Char('v') => self.state.toggle_level(LogLevel::Verbose),
                             _ => {}
                         }
                     }
@@ -293,45 +388,69 @@ impl Tui {
     }
 
     fn draw_logs(f: &mut Frame, area: Rect, state: &AppState) {
+        // Calculate actual display area accounting for borders and padding
+        let inner_width = area.width.saturating_sub(2);  // Subtract 2 for borders
+        let max_display = area.height.saturating_sub(2); // Subtract 2 for borders
+        let total_logs = state.filtered_logs.len();
+        
+        // Calculate the start index for displaying logs
+        let start_index = if state.tail_mode {
+            total_logs.saturating_sub(max_display as usize)
+        } else {
+            state.scroll
+        };
+
         let visible_logs: Vec<ListItem> = state.filtered_logs
             .iter()
+            .skip(start_index)
+            .take(max_display as usize)
             .filter_map(|&index| state.logs.get(index))
-            .skip(state.scroll)
-            .take(area.height as usize)
             .map(|log| {
+                // Fixed widths for each component
+                const TIMESTAMP_WIDTH: usize = 19;
+                const TAG_WIDTH: usize = 8;
+                const LEVEL_WIDTH: usize = 5;
+                const PADDING: usize = 7;  // For brackets, spaces, and colon
+
+                // Calculate remaining width for message
+                let message_width = (inner_width as usize)
+                    .saturating_sub(TIMESTAMP_WIDTH)
+                    .saturating_sub(TAG_WIDTH)
+                    .saturating_sub(LEVEL_WIDTH)
+                    .saturating_sub(PADDING);
+
                 let line = format!(
-                    "{} [{}] {}: {}",
+                    "{:<width$} [{:<tag_width$}] {:<level_width$}: {:.message_width$}",
                     log.timestamp,
-                    log.tag,
+                    log.tag.chars().take(TAG_WIDTH).collect::<String>(),
                     log.level.as_str(),
-                    log.message
+                    log.message,
+                    width = TIMESTAMP_WIDTH,
+                    tag_width = TAG_WIDTH,
+                    level_width = LEVEL_WIDTH,
+                    message_width = message_width
                 );
                 
-                // Highlight the matching text if in search mode
-                let style = if state.search_mode && !state.search_query.is_empty() {
-                    Style::default()
-                        .fg(log.level.color())
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(log.level.color())
-                };
-                
-                ListItem::new(line).style(style)
+                ListItem::new(line).style(Style::default().fg(log.level.color()))
             })
             .collect();
 
         let title = if state.search_mode {
-            format!("Log Output (Searching: '{}', {} matches)", 
+            format!(" Log Output (Searching: '{}', {} matches) ", 
                 state.search_query,
                 state.filtered_logs.len()
             )
         } else {
-            format!("Log Output ({} logs)", state.filtered_logs.len())
+            format!(" Log Output ({} logs) ", state.filtered_logs.len())
         };
 
         let logs = List::new(visible_logs)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_type(ratatui::widgets::BorderType::Rounded))
             .highlight_style(Style::default().bg(Color::DarkGray));
+
         f.render_widget(logs, area);
     }
 
@@ -388,11 +507,20 @@ impl Tui {
         let status = if state.search_mode {
             format!("Search: {} | Press Enter to confirm or Esc to cancel", state.search_query)
         } else {
+            let filters = format!("[{}{}{}{}{}]",
+                if state.level_filters.contains(&LogLevel::Error) { "E" } else { "-" },
+                if state.level_filters.contains(&LogLevel::Warning) { "W" } else { "-" },
+                if state.level_filters.contains(&LogLevel::Info) { "I" } else { "-" },
+                if state.level_filters.contains(&LogLevel::Debug) { "D" } else { "-" },
+                if state.level_filters.contains(&LogLevel::Verbose) { "V" } else { "-" },
+            );
             format!(
-                "Logs: {} | Scroll: {} | {} | View: {:?}",
+                "Logs: {} | Filters: {} | Scroll: {} | {} | {} | View: {:?}",
                 state.logs.len(),
+                filters,
                 state.scroll,
                 if state.paused { "PAUSED" } else { "RUNNING" },
+                if state.tail_mode { "TAIL" } else { "SCROLL" },
                 state.current_view,
             )
         };
@@ -403,7 +531,7 @@ impl Tui {
     }
 
     fn draw_help(f: &mut Frame, area: Rect) {
-        let help_text = "1-3: Switch Views | Space: Pause | /: Search | ↑/↓: Scroll | End/G: Latest | Home/g: First | q: Quit";
+        let help_text = "1-3: Views | Space: Pause | t: Tail | /: Search | e/w/i/d/v: Toggle Filters | ↑/↓: Scroll | End/G: Latest | Home/g: First | q: Quit";
         let help = Paragraph::new(help_text)
             .block(Block::default().borders(Borders::ALL))
             .style(Style::default().fg(Color::Gray));
