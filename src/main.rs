@@ -150,9 +150,9 @@ fn run_interactive_mode(cli: &Cli) -> Result<(), DevInsightError> {
         None
     };
 
-    // Set up ADB command
+    // Set up ADB command with a small buffer of recent logs
     let process = Command::new("adb")
-        .args(["logcat", "-v", "threadtime"])
+        .args(["logcat", "-v", "threadtime", "-T", "50"])  // Get last 50 logs
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|_| DevInsightError::AdbNotFound)?;

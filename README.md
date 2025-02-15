@@ -185,3 +185,72 @@ Example log file path:
 ~/android_logs/logcat_20240321_143022.jsonl  # When using --save-path ~/android_logs
 ```
 
+## Testing and Debugging
+
+### Generate Test Logs
+Use these commands to generate test logs with different levels and patterns:
+
+```bash
+# Generate multiple error logs
+for i in {0..9}; do adb shell "log -p e -t TestApp 'Error message'"; done
+
+# Generate warning logs
+for i in {0..9}; do adb shell "log -p w -t TestApp 'Warning message'"; done
+
+# Generate info logs
+for i in {0..9}; do adb shell "log -p i -t TestApp 'Info message'"; done
+
+# Generate debug logs
+for i in {0..9}; do adb shell "log -p d -t TestApp 'Debug message'"; done
+
+# Generate verbose logs
+for i in {0..9}; do adb shell "log -p v -t TestApp 'Verbose message'"; done
+
+# Generate mixed logs
+for level in e w i d v; do
+    adb shell "log -p $level -t TestApp 'Test message for level $level'"
+done
+
+# Generate logs with different tags
+for tag in App1 App2 App3; do
+    adb shell "log -p i -t $tag 'Message from $tag'"
+done
+
+# Generate logs with increasing numbers
+for i in {1..10}; do
+    adb shell "log -p i -t TestApp 'Message number $i'"
+done
+
+# Rapid log generation (stress test)
+for i in {1..100}; do
+    adb shell "log -p i -t TestApp 'Stress test message $i'" &
+done
+```
+
+### Testing Features
+1. Test log level filtering:
+   - Press 'e', 'w', 'i', 'd', 'v' to toggle different log levels
+   - Generate logs of different levels to verify filtering
+
+2. Test search functionality:
+   - Press '/' to enter search mode
+   - Type "error", "warning", or any other term
+   - Press ESC to clear search
+
+3. Test tail mode:
+   - Press 't' to toggle tail mode
+   - Generate new logs to verify auto-scroll
+   - Use Up/Down arrows to navigate
+
+4. Test storage:
+```bash
+# Test with default storage
+cargo run -- -i --save
+
+# Test with custom storage path
+cargo run -- -i --save --save-path ./test_logs
+
+# Test with smaller rotation size (1MB)
+cargo run -- -i --save --max-size 1
+```
+
