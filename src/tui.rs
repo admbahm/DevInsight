@@ -508,7 +508,7 @@ impl Tui {
     }
 
     fn draw(&mut self) -> io::Result<()> {
-        let status = self.get_status();  // Get status before terminal.draw
+        let status = self.get_status();
         self.terminal.draw(|f| {
             let size = f.size();
             let main_block = Block::default()
@@ -528,7 +528,7 @@ impl Tui {
                 .split(size);
 
             f.render_widget(main_block, size);
-            Self::draw_tabs(f, main_layout[0], self.state.current_view);
+            Self::draw_tabs(f, main_layout[0], self.state.current_view, self.state.connection_status);
             
             match self.state.current_view {
                 View::Logs => Self::draw_logs(f, main_layout[1], &self.state),
@@ -545,10 +545,43 @@ impl Tui {
         Ok(())
     }
 
-    fn draw_tabs(f: &mut Frame, area: Rect, current_view: View) {
+    fn draw_tabs(f: &mut Frame, area: Rect, current_view: View, connection_status: ConnectionStatus) {
         let titles = vec!["Logs", "Stats", "Storage"];
+        
+        // Create connection indicator
+        let connection = match connection_status {
+            ConnectionStatus::Connected => format!("🟢 {}", "Connected".green()),
+            ConnectionStatus::Disconnected => format!("🔴 {}", "Disconnected".red()),
+            ConnectionStatus::Error => format!("⚠️  {}", "Error".yellow()),
+        };
+
+        // Calculate padding to right-align connection status
+        let total_width = area.width as usize;
+        let connection_width = connection.chars().count();
+        let base_title = "Views";
+        let tabs_width = titles.iter().map(|t| t.len() + 3).sum::<usize>();
+        
+        // Calculate padding to push connection status to the absolute right edge
+        let padding_width = total_width
+            .saturating_sub(base_title.len())
+            .saturating_sub(connection_width)
+            .saturating_sub(tabs_width)
+            .saturating_sub(4); // Account for borders and extra margin
+        
+        let title = format!("{}{}{}",
+            base_title,
+            " ".repeat(padding_width),
+            connection
+        );
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .title_alignment(ratatui::layout::Alignment::Left)
+            .title_style(Style::default().fg(Color::White));
+
         let tabs = Tabs::new(titles)
-            .block(Block::default().borders(Borders::ALL).title("Views"))
+            .block(block)
             .select(match current_view {
                 View::Logs => 0,
                 View::Stats => 1,
@@ -556,6 +589,7 @@ impl Tui {
             })
             .style(Style::default().fg(Color::White))
             .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        
         f.render_widget(tabs, area);
     }
 
@@ -702,37 +736,45 @@ impl Tui {
         }
     }
 
-    // Helper method for normal status
+    // Update the draw_normal_status method
     fn draw_normal_status(&self, state: &AppState) -> String {
-        let connection_indicator = match state.connection_status {
-            ConnectionStatus::Connected => format!("🟢 {}", "Connected".green()),
-            ConnectionStatus::Disconnected => format!("🔴 {}", "Disconnected".red()),
-            ConnectionStatus::Error => format!("⚠️  {}", "Error".yellow()),
-        };
-
-        // Add spaces between filter indicators for better readability
-        let filters = format!("[{} {} {} {} {}]",
-            if state.level_filters.contains(&LogLevel::Error) { "E".red() } else { "-".dimmed() },
-            if state.level_filters.contains(&LogLevel::Warning) { "W".yellow() } else { "-".dimmed() },
-            if state.level_filters.contains(&LogLevel::Info) { "I".green() } else { "-".dimmed() },
-            if state.level_filters.contains(&LogLevel::Debug) { "D".blue() } else { "-".dimmed() },
-            if state.level_filters.contains(&LogLevel::Verbose) { "V".white() } else { "-".dimmed() },
+        let filters = format!("[{}]",
+            ["E", "W", "I", "D", "V"].iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let level = match i {
+                        0 => (LogLevel::Error, c.red()),
+                        1 => (LogLevel::Warning, c.yellow()),
+                        2 => (LogLevel::Info, c.green()),
+                        3 => (LogLevel::Debug, c.blue()),
+                        _ => (LogLevel::Verbose, c.white()),
+                    };
+                    if state.level_filters.contains(&level.0) {
+                        level.1
+                    } else {
+                        "-".dimmed()
+                    }
+                })
+                .fold(String::new(), |mut acc, color| {
+                    if !acc.is_empty() {
+                        acc.push(' ');
+                    }
+                    acc.push_str(&color.to_string());
+                    acc
+                })
         );
 
         let status = if state.paused { "PAUSED".red() } else { "RUNNING".green() };
         let mode = if state.tail_mode { "TAIL".cyan() } else { "SCROLL".yellow() };
-        let position = format!("{:>3}/{:<3}", state.scroll + 1, state.filtered_logs.len());
-        let log_count = format!("{:>3} logs", state.filtered_logs.len());
+        let log_count = format!("{:>4} logs", state.filtered_logs.len());
+        let position = format!("{:>4}/{:<4}", state.scroll + 1, state.filtered_logs.len());
 
-        format!(
-            "{} | {} | Filters {} | {} | {} | {} | {}",
-            connection_indicator,
-            log_count,
+        format!("{} {} {} | {} | Position: {}",
             filters,
-            position,
             status,
             mode,
-            state.current_view
+            log_count,
+            position
         )
     }
 
