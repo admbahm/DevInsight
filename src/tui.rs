@@ -711,7 +711,7 @@ impl Tui {
         };
 
         // Make the filter display more readable with colors
-        let filters = format!("Filters [{}{}{}{}{}]",
+        let filters = format!("[{}{}{}{}{}]",
             if state.level_filters.contains(&LogLevel::Error) { "E".red() } else { "-".dimmed() },
             if state.level_filters.contains(&LogLevel::Warning) { "W".yellow() } else { "-".dimmed() },
             if state.level_filters.contains(&LogLevel::Info) { "I".green() } else { "-".dimmed() },
@@ -720,11 +720,12 @@ impl Tui {
         );
 
         format!(
-            "{} | {} logs | {} | Scroll: {:>4} | {} | {} | {}",
+            "{} | {} logs | {} | {}/{} | {} | {} | {}",
             connection_indicator,
-            state.logs.len(),
+            state.filtered_logs.len(),
             filters,
-            state.scroll,
+            state.scroll + 1,  // Make position 1-based
+            state.filtered_logs.len(),
             if state.paused { "PAUSED".red() } else { "RUNNING".green() },
             if state.tail_mode { "TAIL".cyan() } else { "SCROLL".yellow() },
             state.current_view,
@@ -732,7 +733,7 @@ impl Tui {
     }
 
     fn draw_help(f: &mut Frame, area: Rect) {
-        let help_text = "1-3: Views | Space: Pause | t: Tail | /: Search | y: Copy | n: Toggle Notifications | e/w/i/d/v: Filters | ↑/↓: Scroll | End/G: Latest | Home/g: First | q: Quit";
+        let help_text = "1-3: Views | Space: Pause | t: Tail | /: Search | y: Copy | n: Notifications | e/w/i/d/v: Filters | ↑/↓: Scroll | End/G: Latest | Home/g: First | q: Quit";
         let help = Paragraph::new(help_text)
             .block(Block::default().borders(Borders::ALL))
             .style(Style::default().fg(Color::Gray));
