@@ -7,12 +7,19 @@ use ratatui::{
     Terminal, Frame,
 };
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 use std::collections::VecDeque;
 use crate::storage::StorageUpdate;
+use copypasta::{ClipboardContext, ClipboardProvider};
+use std::time::{Instant, Duration};
+use std::process::Command;
+use colored::Colorize;
+
+#[cfg(feature = "macos")]
+use mac_notification_sys::{get_bundle_identifier_or_default, send_notification, Notification};
 
 pub struct LogEntry {
     pub level: LogLevel,
@@ -63,6 +70,17 @@ pub enum View {
     Storage,
 }
 
+// Add Display implementation for View
+impl std::fmt::Display for View {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            View::Logs => write!(f, "Logs"),
+            View::Stats => write!(f, "Stats"),
+            View::Storage => write!(f, "Storage"),
+        }
+    }
+}
+
 // Add application state
 pub struct AppState {
     pub current_view: View,
@@ -76,6 +94,10 @@ pub struct AppState {
     pub stats: LogStats,
     pub level_filters: Vec<LogLevel>,  // Enabled log levels
     pub tail_mode: bool,  // Add this field
+    pub status_message: Option<(String, Instant)>,  // (message, timestamp)
+    pub connection_status: ConnectionStatus,
+    pub notify_on_error: bool,
+    pub last_notification: Option<Instant>,
 }
 
 pub struct StorageInfo {
@@ -90,6 +112,13 @@ pub struct LogStats {
     pub info_count: usize,
     pub debug_count: usize,
     pub verbose_count: usize,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum ConnectionStatus {
+    Connected,
+    Disconnected,
+    Error,
 }
 
 impl AppState {
@@ -118,11 +147,37 @@ impl AppState {
                 LogLevel::Verbose,
             ],
             tail_mode: true,  // Start with tail mode enabled
+            status_message: None,
+            connection_status: ConnectionStatus::Connected,
+            notify_on_error: true,
+            last_notification: None,
         }
     }
 
     pub fn add_log(&mut self, entry: LogEntry) {
         if !self.paused {
+            // Send macOS notification for errors
+            #[cfg(feature = "macos")]
+            if self.notify_on_error && entry.level == LogLevel::Error {
+                // Limit notifications to once every 5 seconds
+                if self.last_notification.map_or(true, |t| t.elapsed() > Duration::from_secs(5)) {
+                    let bundle = get_bundle_identifier_or_default("com.devinsight.app");
+                    let mut notification = Notification::new();
+                    notification.title("DevInsight Error")
+                               .subtitle(&entry.tag)
+                               .message(&entry.message)
+                               .sound("Basso");
+
+                    send_notification(
+                        &bundle,
+                        Some(&entry.tag),
+                        "DevInsight Error",
+                        Some(&notification)
+                    ).ok();
+                    self.last_notification = Some(Instant::now());
+                }
+            }
+
             // Batch process logs for better performance
             if self.logs.len() >= 10000 {
                 // Remove oldest 1000 logs when we hit the limit
@@ -187,6 +242,7 @@ pub struct Tui {
     state: AppState,
     log_rx: std::sync::mpsc::Receiver<LogEntry>,
     storage_rx: std::sync::mpsc::Receiver<StorageUpdate>,
+    clipboard: Option<ClipboardContext>,
 }
 
 impl Tui {
@@ -197,14 +253,17 @@ impl Tui {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         stdout.execute(EnterAlternateScreen)?;
+        stdout.execute(EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
+        let clipboard = ClipboardContext::new().ok();
 
         Ok(Self {
             terminal,
             state: AppState::new(),
             log_rx,
             storage_rx,
+            clipboard,
         })
     }
 
@@ -215,6 +274,9 @@ impl Tui {
         let mut no_logs_count = 0;
         const INITIAL_BATCH_SIZE: usize = 50;
         const MAX_WAIT_CYCLES: usize = 20;  // About 1 second max wait
+
+        let mut last_check = Instant::now();
+        const CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
         while collected < INITIAL_BATCH_SIZE && no_logs_count < MAX_WAIT_CYCLES {
             self.terminal.draw(|f| {
@@ -252,6 +314,22 @@ impl Tui {
                 no_logs_count += 1;
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
+
+            if last_check.elapsed() >= CHECK_INTERVAL {
+                // Check ADB connection
+                match Command::new("adb").args(["get-state"]).output() {
+                    Ok(output) if output.status.success() => {
+                        self.state.connection_status = ConnectionStatus::Connected;
+                    }
+                    Ok(_) => {
+                        self.state.connection_status = ConnectionStatus::Disconnected;
+                    }
+                    Err(_e) => {
+                        self.state.connection_status = ConnectionStatus::Error;
+                    }
+                }
+                last_check = Instant::now();
+            }
         }
 
         // Force initial update and scroll position
@@ -279,67 +357,150 @@ impl Tui {
 
             self.draw()?;
 
-            if event::poll(std::time::Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
-                    if self.state.search_mode {
-                        match key.code {
-                            KeyCode::Esc => {
-                                self.state.search_mode = false;
-                                self.state.search_query.clear();
-                                self.state.update_filtered_logs();
-                            }
-                            KeyCode::Enter => {
-                                self.state.search_mode = false;
-                            }
-                            KeyCode::Char(c) => {
-                                self.state.search_query.push(c);
-                                self.state.update_filtered_logs();
-                            }
-                            KeyCode::Backspace => {
-                                if !self.state.search_query.is_empty() {
-                                    self.state.search_query.pop();
+            if event::poll(std::time::Duration::from_millis(50))? {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if self.state.search_mode {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    self.state.search_mode = false;
+                                    self.state.search_query.clear();
                                     self.state.update_filtered_logs();
                                 }
+                                KeyCode::Enter => {
+                                    self.state.search_mode = false;
+                                }
+                                KeyCode::Char(c) => {
+                                    self.state.search_query.push(c);
+                                    self.state.update_filtered_logs();
+                                }
+                                KeyCode::Backspace => {
+                                    if !self.state.search_query.is_empty() {
+                                        self.state.search_query.pop();
+                                        self.state.update_filtered_logs();
+                                    }
+                                }
+                                _ => {}
                             }
-                            _ => {}
+                        } else {
+                            match key.code {
+                                KeyCode::Char('q') => break,
+                                KeyCode::Char('1') => self.state.current_view = View::Logs,
+                                KeyCode::Char('2') => self.state.current_view = View::Stats,
+                                KeyCode::Char('3') => self.state.current_view = View::Storage,
+                                KeyCode::Char('/') => self.state.search_mode = true,
+                                KeyCode::Char(' ') => self.state.paused = !self.state.paused,
+                                KeyCode::Char('t') => self.state.tail_mode = !self.state.tail_mode,
+                                KeyCode::Up => {
+                                    if self.state.scroll > 0 {
+                                        self.state.tail_mode = false;  // Disable tail mode when scrolling up
+                                        self.state.scroll = self.state.scroll.saturating_sub(1);
+                                    }
+                                },
+                                KeyCode::Down => {
+                                    let max_scroll = self.state.filtered_logs.len().saturating_sub(1);
+                                    if self.state.scroll < max_scroll {
+                                        self.state.scroll += 1;
+                                        // Only re-enable tail mode if we're at the very bottom
+                                        if self.state.scroll == max_scroll {
+                                            self.state.tail_mode = true;
+                                        }
+                                    }
+                                },
+                                KeyCode::End | KeyCode::Char('G') => {
+                                    let max_scroll = self.state.filtered_logs.len().saturating_sub(1);
+                                    self.state.scroll = max_scroll;
+                                }
+                                KeyCode::Home | KeyCode::Char('g') => {
+                                    self.state.scroll = 0;
+                                }
+                                KeyCode::Char('e') => self.state.toggle_level(LogLevel::Error),
+                                KeyCode::Char('w') => self.state.toggle_level(LogLevel::Warning),
+                                KeyCode::Char('i') => self.state.toggle_level(LogLevel::Info),
+                                KeyCode::Char('d') => self.state.toggle_level(LogLevel::Debug),
+                                KeyCode::Char('v') => self.state.toggle_level(LogLevel::Verbose),
+                                KeyCode::PageUp => {
+                                    self.state.tail_mode = false;
+                                    self.state.scroll = self.state.scroll.saturating_sub(10);
+                                },
+                                KeyCode::PageDown => {
+                                    let max_scroll = self.state.filtered_logs.len().saturating_sub(1);
+                                    self.state.scroll = (self.state.scroll + 10).min(max_scroll);
+                                    if self.state.scroll == max_scroll {
+                                        self.state.tail_mode = true;
+                                    }
+                                },
+                                KeyCode::Char('y') => {
+                                    if let Some(clipboard) = &mut self.clipboard {
+                                        if let Some(&index) = self.state.filtered_logs.get(self.state.scroll) {
+                                            if let Some(log) = self.state.logs.get(index) {
+                                                let log_text = format!(
+                                                    "{} [{}] {}: {}",
+                                                    log.timestamp,
+                                                    log.tag,
+                                                    log.level.as_str(),
+                                                    log.message
+                                                );
+                                                if clipboard.set_contents(log_text).is_ok() {
+                                                    // Show copy confirmation in status
+                                                    self.state.status_message = Some(("Log copied to clipboard".to_string(), Instant::now()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                KeyCode::Char('c') => {
+                                    // Command+C: Copy current log
+                                    if let Some(clipboard) = &mut self.clipboard {
+                                        if let Some(&index) = self.state.filtered_logs.get(self.state.scroll) {
+                                            if let Some(log) = self.state.logs.get(index) {
+                                                let log_text = format!(
+                                                    "{} [{}] {}: {}",
+                                                    log.timestamp,
+                                                    log.tag,
+                                                    log.level.as_str(),
+                                                    log.message
+                                                );
+                                                if clipboard.set_contents(log_text).is_ok() {
+                                                    self.state.status_message = Some(("Log copied to clipboard".to_string(), Instant::now()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                KeyCode::Char('n') => {
+                                    // Command+N: Toggle notifications
+                                    self.state.notify_on_error = !self.state.notify_on_error;
+                                    self.state.status_message = Some((
+                                        format!("Notifications {}", if self.state.notify_on_error { "enabled" } else { "disabled" }),
+                                        Instant::now()
+                                    ));
+                                },
+                                _ => {}
+                            }
                         }
-                    } else {
-                        match key.code {
-                            KeyCode::Char('q') => break,
-                            KeyCode::Char('1') => self.state.current_view = View::Logs,
-                            KeyCode::Char('2') => self.state.current_view = View::Stats,
-                            KeyCode::Char('3') => self.state.current_view = View::Storage,
-                            KeyCode::Char('/') => self.state.search_mode = true,
-                            KeyCode::Char(' ') => self.state.paused = !self.state.paused,
-                            KeyCode::Char('t') => self.state.tail_mode = !self.state.tail_mode,
-                            KeyCode::Up => {
-                                self.state.tail_mode = false;  // Disable tail mode when manually scrolling
-                                self.state.scroll = self.state.scroll.saturating_sub(1);
+                    },
+                    Event::Mouse(MouseEvent { kind, .. }) => {
+                        match kind {
+                            MouseEventKind::ScrollUp => {
+                                if self.state.scroll > 0 {
+                                    self.state.tail_mode = false;
+                                    self.state.scroll = self.state.scroll.saturating_sub(3);
+                                }
                             }
-                            KeyCode::Down => {
-                                if self.state.scroll < self.state.filtered_logs.len().saturating_sub(1) {
-                                    self.state.scroll += 1;
-                                    // Re-enable tail mode when scrolling to bottom
-                                    if self.state.scroll >= self.state.filtered_logs.len().saturating_sub(1) {
+                            MouseEventKind::ScrollDown => {
+                                let max_scroll = self.state.filtered_logs.len().saturating_sub(1);
+                                if self.state.scroll < max_scroll {
+                                    self.state.scroll = (self.state.scroll + 3).min(max_scroll);
+                                    if self.state.scroll == max_scroll {
                                         self.state.tail_mode = true;
                                     }
                                 }
                             }
-                            KeyCode::End | KeyCode::Char('G') => {
-                                let max_scroll = self.state.filtered_logs.len().saturating_sub(1);
-                                self.state.scroll = max_scroll;
-                            }
-                            KeyCode::Home | KeyCode::Char('g') => {
-                                self.state.scroll = 0;
-                            }
-                            KeyCode::Char('e') => self.state.toggle_level(LogLevel::Error),
-                            KeyCode::Char('w') => self.state.toggle_level(LogLevel::Warning),
-                            KeyCode::Char('i') => self.state.toggle_level(LogLevel::Info),
-                            KeyCode::Char('d') => self.state.toggle_level(LogLevel::Debug),
-                            KeyCode::Char('v') => self.state.toggle_level(LogLevel::Verbose),
                             _ => {}
                         }
-                    }
+                    },
+                    _ => {}
                 }
             }
         }
@@ -347,48 +508,38 @@ impl Tui {
     }
 
     fn draw(&mut self) -> io::Result<()> {
-        let state = &self.state;
+        let status = self.get_status();  // Get status before terminal.draw
         self.terminal.draw(|f| {
-            // Get terminal size
             let size = f.size();
-            
-            // Create a main block for the entire UI
             let main_block = Block::default()
                 .borders(Borders::NONE)
                 .style(Style::default());
             
-            // Create main layout with fixed margins
             let main_layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),  // Tabs
-                    Constraint::Min(5),     // Main content (minimum 5 lines)
-                    Constraint::Length(1),  // Status
-                    Constraint::Length(3),  // Help
+                    Constraint::Length(3),
+                    Constraint::Min(5),
+                    Constraint::Length(1),
+                    Constraint::Length(3),
                 ].as_ref())
-                .horizontal_margin(1)       // Add horizontal margin
-                .vertical_margin(0)         // No vertical margin
+                .horizontal_margin(1)
+                .vertical_margin(0)
                 .split(size);
 
-            // Render each section within the main block
             f.render_widget(main_block, size);
-            Self::draw_tabs(f, main_layout[0], state.current_view);
+            Self::draw_tabs(f, main_layout[0], self.state.current_view);
             
-            // Create content area with proper borders
-            let content_area = main_layout[1];
-            let inner_area = Block::default()
-                .borders(Borders::ALL)
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .inner(content_area);
-            
-            // Render appropriate content
-            match state.current_view {
-                View::Logs => Self::draw_logs(f, inner_area, state),
-                View::Stats => Self::draw_stats(f, inner_area, state),
-                View::Storage => Self::draw_storage(f, inner_area, state),
+            match self.state.current_view {
+                View::Logs => Self::draw_logs(f, main_layout[1], &self.state),
+                View::Stats => Self::draw_stats(f, main_layout[1], &self.state),
+                View::Storage => Self::draw_storage(f, main_layout[1], &self.state),
             }
 
-            Self::draw_status(f, main_layout[2], state);
+            let status_widget = Paragraph::new(status)
+                .style(Style::default().fg(Color::White));
+            f.render_widget(status_widget, main_layout[2]);
+
             Self::draw_help(f, main_layout[3]);
         })?;
         Ok(())
@@ -536,35 +687,57 @@ impl Tui {
         f.render_widget(storage_widget, area);
     }
 
-    fn draw_status(f: &mut Frame, area: Rect, state: &AppState) {
-        let status = if state.search_mode {
-            format!("Search: {} | Press Enter to confirm or Esc to cancel", state.search_query)
+    // New method to get status without borrowing self mutably
+    fn get_status(&self) -> String {
+        if self.state.search_mode {
+            format!("Search: {} | Press Enter to confirm or Esc to cancel", self.state.search_query)
+        } else if let Some((msg, time)) = &self.state.status_message {
+            if time.elapsed().as_secs() > 2 {
+                self.draw_normal_status(&self.state)
+            } else {
+                msg.clone()
+            }
         } else {
-            let filters = format!("[{}{}{}{}{}]",
-                if state.level_filters.contains(&LogLevel::Error) { "E" } else { "-" },
-                if state.level_filters.contains(&LogLevel::Warning) { "W" } else { "-" },
-                if state.level_filters.contains(&LogLevel::Info) { "I" } else { "-" },
-                if state.level_filters.contains(&LogLevel::Debug) { "D" } else { "-" },
-                if state.level_filters.contains(&LogLevel::Verbose) { "V" } else { "-" },
-            );
-            format!(
-                "Logs: {} | Filters: {} | Scroll: {} | {} | {} | View: {:?}",
-                state.logs.len(),
-                filters,
-                state.scroll,
-                if state.paused { "PAUSED" } else { "RUNNING" },
-                if state.tail_mode { "TAIL" } else { "SCROLL" },
-                state.current_view,
-            )
+            self.draw_normal_status(&self.state)
+        }
+    }
+
+    // Helper method for normal status
+    fn draw_normal_status(&self, state: &AppState) -> String {
+        let connection_indicator = match state.connection_status {
+            ConnectionStatus::Connected => format!("🟢 {}", "Connected".green()),
+            ConnectionStatus::Disconnected => format!("🔴 {}", "Disconnected".red()),
+            ConnectionStatus::Error => format!("⚠️  {}", "Error".yellow()),
         };
 
-        let status_widget = Paragraph::new(status)
-            .style(Style::default().fg(Color::White));
-        f.render_widget(status_widget, area);
+        // Add spaces between filter indicators for better readability
+        let filters = format!("[{} {} {} {} {}]",
+            if state.level_filters.contains(&LogLevel::Error) { "E".red() } else { "-".dimmed() },
+            if state.level_filters.contains(&LogLevel::Warning) { "W".yellow() } else { "-".dimmed() },
+            if state.level_filters.contains(&LogLevel::Info) { "I".green() } else { "-".dimmed() },
+            if state.level_filters.contains(&LogLevel::Debug) { "D".blue() } else { "-".dimmed() },
+            if state.level_filters.contains(&LogLevel::Verbose) { "V".white() } else { "-".dimmed() },
+        );
+
+        let status = if state.paused { "PAUSED".red() } else { "RUNNING".green() };
+        let mode = if state.tail_mode { "TAIL".cyan() } else { "SCROLL".yellow() };
+        let position = format!("{:>3}/{:<3}", state.scroll + 1, state.filtered_logs.len());
+        let log_count = format!("{:>3} logs", state.filtered_logs.len());
+
+        format!(
+            "{} | {} | Filters {} | {} | {} | {} | {}",
+            connection_indicator,
+            log_count,
+            filters,
+            position,
+            status,
+            mode,
+            state.current_view
+        )
     }
 
     fn draw_help(f: &mut Frame, area: Rect) {
-        let help_text = "1-3: Views | Space: Pause | t: Tail | /: Search | e/w/i/d/v: Toggle Filters | ↑/↓: Scroll | End/G: Latest | Home/g: First | q: Quit";
+        let help_text = "1-3: Views | Space: Pause | t: Tail | /: Search | y: Copy | n: Notifications | e/w/i/d/v: Filters | ↑/↓: Scroll | End/G: Latest | Home/g: First | q: Quit";
         let help = Paragraph::new(help_text)
             .block(Block::default().borders(Borders::ALL))
             .style(Style::default().fg(Color::Gray));
@@ -578,6 +751,10 @@ impl Drop for Tui {
         self.terminal
             .backend_mut()
             .execute(LeaveAlternateScreen)
+            .unwrap();
+        self.terminal
+            .backend_mut()
+            .execute(DisableMouseCapture)
             .unwrap();
     }
 }

@@ -48,6 +48,10 @@ devinsight -i --tag MyApp
 ✅ **Flexible output formats**
 ✅ **Timestamp-based filtering**
 ✅ **Optimized Rust performance** for low-latency processing
+✅ **macOS-specific optimizations:**
+  - **Native system notifications for errors**
+  - **Command key shortcuts (⌘C for copy, ⌘N for notification toggle)**
+  - **Clipboard integration**
 
 ## Installation
 

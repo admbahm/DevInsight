@@ -150,9 +150,12 @@ fn run_interactive_mode(cli: &Cli) -> Result<(), DevInsightError> {
         None
     };
 
-    // Set up ADB command with a small buffer of recent logs
+    // Set up ADB command with optimized buffer settings
     let process = Command::new("adb")
-        .args(["logcat", "-v", "threadtime", "-T", "50"])  // Get last 50 logs
+        .args(["logcat", 
+              "-v", "threadtime",     // Use threadtime format
+              "-T", "50",            // Get last 50 logs
+              "-b", "all"])          // All buffers
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|_| DevInsightError::AdbNotFound)?;
@@ -166,22 +169,27 @@ fn run_interactive_mode(cli: &Cli) -> Result<(), DevInsightError> {
     let mut storage = storage;  // Move storage into the thread
     std::thread::spawn(move || {
         for line in reader.lines() {
-            if let Ok(log) = line {
-                let entry = parse_log_entry(&log);
-                
-                // Store log if storage is enabled
-                if let Some(storage) = &mut storage {
-                    let stored_log = StoredLog {
-                        timestamp: Local::now(),
-                        level: entry.level.as_str().to_string(),
-                        tag: entry.tag.clone(),
-                        message: entry.message.clone(),
-                        device_id: None,
-                    };
-                    storage.store_log(stored_log).ok();
+            match line {
+                Ok(log) => {
+                    let entry = parse_log_entry(&log);
+                    
+                    // Store log if storage is enabled
+                    if let Some(storage) = &mut storage {
+                        let stored_log = StoredLog {
+                            timestamp: Local::now(),
+                            level: entry.level.as_str().to_string(),
+                            tag: entry.tag.clone(),
+                            message: entry.message.clone(),
+                            device_id: None,
+                        };
+                        storage.store_log(stored_log).ok();
+                    }
+                    
+                    tx_clone.send(entry).ok();
                 }
-                
-                tx_clone.send(entry).ok();
+                Err(e) => {
+                    eprintln!("Error reading log: {}", e);  // Use eprintln for errors
+                }
             }
         }
     });
