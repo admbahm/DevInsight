@@ -1,7 +1,7 @@
 use std::io;
 use ratatui::{
     backend::CrosstermBackend,
-    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Gauge},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
     layout::{Layout, Direction, Constraint, Rect},
     style::{Color, Style, Modifier},
     Terminal, Frame,
@@ -347,28 +347,49 @@ impl Tui {
     }
 
     fn draw(&mut self) -> io::Result<()> {
-        let state = &self.state; // Take a reference to avoid multiple borrows
+        let state = &self.state;
         self.terminal.draw(|f| {
-            let chunks = Layout::default()
+            // Get terminal size
+            let size = f.size();
+            
+            // Create a main block for the entire UI
+            let main_block = Block::default()
+                .borders(Borders::NONE)
+                .style(Style::default());
+            
+            // Create main layout with fixed margins
+            let main_layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),
-                    Constraint::Min(0),
-                    Constraint::Length(1),
-                    Constraint::Length(3),
-                ])
-                .split(f.size());
+                    Constraint::Length(3),  // Tabs
+                    Constraint::Min(5),     // Main content (minimum 5 lines)
+                    Constraint::Length(1),  // Status
+                    Constraint::Length(3),  // Help
+                ].as_ref())
+                .horizontal_margin(1)       // Add horizontal margin
+                .vertical_margin(0)         // No vertical margin
+                .split(size);
 
-            Self::draw_tabs(f, chunks[0], state.current_view);
+            // Render each section within the main block
+            f.render_widget(main_block, size);
+            Self::draw_tabs(f, main_layout[0], state.current_view);
             
+            // Create content area with proper borders
+            let content_area = main_layout[1];
+            let inner_area = Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .inner(content_area);
+            
+            // Render appropriate content
             match state.current_view {
-                View::Logs => Self::draw_logs(f, chunks[1], state),
-                View::Stats => Self::draw_stats(f, chunks[1], state),
-                View::Storage => Self::draw_storage(f, chunks[1], state),
+                View::Logs => Self::draw_logs(f, inner_area, state),
+                View::Stats => Self::draw_stats(f, inner_area, state),
+                View::Storage => Self::draw_storage(f, inner_area, state),
             }
 
-            Self::draw_status(f, chunks[2], state);
-            Self::draw_help(f, chunks[3]);
+            Self::draw_status(f, main_layout[2], state);
+            Self::draw_help(f, main_layout[3]);
         })?;
         Ok(())
     }
