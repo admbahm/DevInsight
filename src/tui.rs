@@ -417,10 +417,22 @@ impl Tui {
                     .saturating_sub(TIMESTAMP_WIDTH)
                     .saturating_sub(TAG_WIDTH)
                     .saturating_sub(LEVEL_WIDTH)
-                    .saturating_sub(PADDING);
+                    .saturating_sub(PADDING)
+                    .saturating_sub(2);  // Account for icon and space
+
+                // Get the icon for the log level
+                let icon = match log.level {
+                    LogLevel::Error => "🔴",
+                    LogLevel::Warning => "⚠️",
+                    LogLevel::Info => "ℹ️",
+                    LogLevel::Debug => "🔧",
+                    LogLevel::Verbose => "📝",
+                    LogLevel::Unknown => "❓",
+                };
 
                 let line = format!(
-                    "{:<width$} [{:<tag_width$}] {:<level_width$}: {:.message_width$}",
+                    "{} {:<width$} [{:<tag_width$}] {:<level_width$}: {:.message_width$}",
+                    icon,
                     log.timestamp,
                     log.tag.chars().take(TAG_WIDTH).collect::<String>(),
                     log.level.as_str(),
