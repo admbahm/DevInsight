@@ -710,8 +710,8 @@ impl Tui {
             ConnectionStatus::Error => format!("⚠️  {}", "Error".yellow()),
         };
 
-        // Make the filter display more readable with colors
-        let filters = format!("[{}{}{}{}{}]",
+        // Add spaces between filter indicators for better readability
+        let filters = format!("[{} {} {} {} {}]",
             if state.level_filters.contains(&LogLevel::Error) { "E".red() } else { "-".dimmed() },
             if state.level_filters.contains(&LogLevel::Warning) { "W".yellow() } else { "-".dimmed() },
             if state.level_filters.contains(&LogLevel::Info) { "I".green() } else { "-".dimmed() },
@@ -719,16 +719,20 @@ impl Tui {
             if state.level_filters.contains(&LogLevel::Verbose) { "V".white() } else { "-".dimmed() },
         );
 
+        let status = if state.paused { "PAUSED".red() } else { "RUNNING".green() };
+        let mode = if state.tail_mode { "TAIL".cyan() } else { "SCROLL".yellow() };
+        let position = format!("{:>3}/{:<3}", state.scroll + 1, state.filtered_logs.len());
+        let log_count = format!("{:>3} logs", state.filtered_logs.len());
+
         format!(
-            "{} | {} logs | {} | {}/{} | {} | {} | {}",
+            "{} | {} | Filters {} | {} | {} | {} | {}",
             connection_indicator,
-            state.filtered_logs.len(),
+            log_count,
             filters,
-            state.scroll + 1,  // Make position 1-based
-            state.filtered_logs.len(),
-            if state.paused { "PAUSED".red() } else { "RUNNING".green() },
-            if state.tail_mode { "TAIL".cyan() } else { "SCROLL".yellow() },
-            state.current_view,
+            position,
+            status,
+            mode,
+            state.current_view
         )
     }
 
