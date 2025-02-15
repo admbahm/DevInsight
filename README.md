@@ -1,3 +1,37 @@
+# DevInsight v0.1.0 🔍
+
+## Installation
+
+```bash
+# Install directly from crates.io
+cargo install devinsight
+
+# Or build from source
+git clone https://github.com/YOUR_GITHUB/DevInsight.git
+cd DevInsight
+cargo install --path .
+```
+
+## Quick Start
+```bash
+# Basic TUI mode
+devinsight -i
+
+# TUI with log storage
+devinsight -i --save
+
+# Filter specific app logs
+devinsight -i --tag MyApp
+```
+
+## Key Features in v0.1.0
+- 🔄 Real-time log streaming with tail mode
+- 🎨 Interactive filtering (e/w/i/d/v)
+- 🔍 Full-text search with live results
+- 💾 Automatic log storage and rotation
+- 📊 Statistics view
+- ⌨️ Intuitive keyboard shortcuts
+
 # DevInsight: Real-time Log Analyzer for Developers 🚀
 
 ![Build Status](https://img.shields.io/github/actions/workflow/status/YOUR_GITHUB/DevInsight/build.yml?branch=main)
@@ -253,4 +287,19 @@ cargo run -- -i --save --save-path ./test_logs
 # Test with smaller rotation size (1MB)
 cargo run -- -i --save --max-size 1
 ```
+
+## Keyboard Shortcuts
+
+| Key          | Action                    |
+|--------------|---------------------------|
+| e/w/i/d/v    | Toggle log levels        |
+| /            | Enter search mode        |
+| Space        | Pause/resume logs        |
+| t            | Toggle tail mode         |
+| ↑/↓          | Scroll logs             |
+| Home/g       | Jump to first log        |
+| End/G        | Jump to latest log       |
+| 1/2/3        | Switch views            |
+| q            | Quit                     |
+| Esc          | Clear search            |
 

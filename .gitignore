@@ -45,3 +45,8 @@ Cargo.lock
 # Added by cargo
 
 /target
+
+# Release artifacts
+*.tar.gz
+*.zip
+devinsight
