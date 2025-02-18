@@ -366,9 +366,16 @@ impl Tui {
                                     self.state.search_mode = false;
                                     self.state.search_query.clear();
                                     self.state.update_filtered_logs();
+                                    self.state.status_message = None;
+                                    self.draw()?;
+                                    println!("Exited search mode");
                                 }
                                 KeyCode::Enter => {
                                     self.state.search_mode = false;
+                                    self.state.update_filtered_logs();
+                                    self.state.status_message = None;
+                                    self.draw()?;
+                                    println!("Confirmed search: {}", self.state.search_query);
                                 }
                                 KeyCode::Char(c) => {
                                     self.state.search_query.push(c);
@@ -766,9 +773,12 @@ impl Tui {
 
         let status = if state.paused { "PAUSED".red() } else { "RUNNING".green() };
         let mode = if state.tail_mode { "TAIL".cyan() } else { "SCROLL".yellow() };
+        
+        // Use fixed-width formatting for log count and position
         let log_count = format!("{:>4} logs", state.filtered_logs.len());
         let position = format!("{:>4}/{:<4}", state.scroll + 1, state.filtered_logs.len());
 
+        // Add padding between sections for clarity
         format!("{} {} {} | {} | Position: {}",
             filters,
             status,
